@@ -84,6 +84,7 @@ const HELP_TEXT = [
   "  --model <name>                  Model name to use for completions.",
   "  --prompts <file>                Path to a file where each line is a prompt.",
   "  --out <file>                    Output JSONL file (default: dataset.jsonl).",
+  "  --resume true|false             Append only missing prompts based on existing output JSONL.",
   "  --api <baseUrl>                 API base URL (default: https://openrouter.ai/api/v1).",
   "  --system <text>                 Optional system prompt to include.",
   "  --store-system true|false       Whether to emit the system prompt in the dataset (default: true).",
@@ -122,6 +123,7 @@ export type Args = {
   model: string;
   promptsPath: string;
   outPath: string;
+  resume: boolean;
   apiBase: string;
   systemPrompt: string;
   storeSystem: boolean;
@@ -162,6 +164,9 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
   const model = (args.model as string) || "";
   const promptsPath = (args.prompts as string) || "";
   const outPath = (args.out as string) || "dataset.jsonl";
+  const resumeRaw = args.resume;
+  const resume =
+    resumeRaw === undefined ? false : String(resumeRaw).toLowerCase() !== "false";
   const apiBase = (args.api as string) || "https://openrouter.ai/api/v1";
   const systemPrompt = (args.system as string) || "";
   const storeSystemRaw = args["store-system"];
@@ -227,7 +232,7 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
 
   if (!model || !promptsPath) {
     throw new Error(
-      `${USAGE_LINE} [--out dataset.jsonl] [--api https://openrouter.ai/api/v1] [--system "..."] [--store-system true|false] [--concurrent 1] [--openrouter.isFree true|false] [--openrouter.provider openai,anthropic] [--openrouter.providerSort price|throughput|latency] [--reasoningEffort low|medium|high] [--timeout <ms>] [--no-progress]`
+      `${USAGE_LINE} [--out dataset.jsonl] [--resume true|false] [--api https://openrouter.ai/api/v1] [--system "..."] [--store-system true|false] [--concurrent 1] [--openrouter.isFree true|false] [--openrouter.provider openai,anthropic] [--openrouter.providerSort price|throughput|latency] [--reasoningEffort low|medium|high] [--timeout <ms>] [--no-progress]`
     );
   }
 
@@ -235,6 +240,7 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
     model,
     promptsPath,
     outPath,
+    resume,
     apiBase,
     systemPrompt,
     storeSystem,
@@ -303,6 +309,76 @@ export function buildOutputMessages(
     { role: "user" as const, content: userPrompt },
     { role: "assistant" as const, content: assistantContent }
   ];
+}
+
+function extractPromptFromOutputRecord(payload: unknown): string | null {
+  if (!payload || typeof payload !== "object") return null;
+  const messages = (payload as any).messages;
+  if (!Array.isArray(messages)) return null;
+  for (const message of messages) {
+    if (!message || typeof message !== "object") continue;
+    if ((message as any).role !== "user") continue;
+    const content = (message as any).content;
+    if (typeof content !== "string") return null;
+    const trimmed = content.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+  return null;
+}
+
+async function loadAnsweredPromptCounts(outPath: string): Promise<{ counts: Map<string, number>; lines: number }> {
+  try {
+    await fs.access(outPath);
+  } catch (err: any) {
+    if (err?.code === "ENOENT") {
+      return { counts: new Map<string, number>(), lines: 0 };
+    }
+    throw err;
+  }
+
+  const counts = new Map<string, number>();
+  const rl = createInterface({
+    input: createReadStream(outPath),
+    crlfDelay: Infinity
+  });
+
+  let lineNum = 0;
+  for await (const rawLine of rl) {
+    lineNum++;
+    const line = rawLine.trim();
+    if (!line) continue;
+
+    let parsedLine: unknown;
+    try {
+      parsedLine = JSON.parse(line);
+    } catch (err: any) {
+      throw new Error(`Invalid JSONL at ${outPath}:${lineNum}: ${err?.message ?? String(err)}`);
+    }
+
+    const prompt = extractPromptFromOutputRecord(parsedLine);
+    if (!prompt) continue;
+    counts.set(prompt, (counts.get(prompt) ?? 0) + 1);
+  }
+
+  return { counts, lines: lineNum };
+}
+
+async function needsLeadingNewlineForAppend(filePath: string): Promise<boolean> {
+  try {
+    const stat = await fs.stat(filePath);
+    if (!stat.isFile() || stat.size === 0) return false;
+    const handle = await fs.open(filePath, "r");
+    try {
+      const buffer = Buffer.alloc(1);
+      await handle.read(buffer, 0, 1, stat.size - 1);
+      return buffer[0] !== 0x0a;
+    } finally {
+      await handle.close();
+    }
+  } catch (err: any) {
+    if (err?.code === "ENOENT") return false;
+    throw err;
+  }
 }
 
 export async function callOpenRouter(
@@ -477,6 +553,7 @@ export async function main(argv = process.argv.slice(2)) {
     model,
     promptsPath,
     outPath,
+    resume,
     apiBase,
     systemPrompt,
     storeSystem,
@@ -521,6 +598,24 @@ export async function main(argv = process.argv.slice(2)) {
     if (bar) bar.writeLine(msg);
     else process.stderr.write(msg + "\n");
   };
+
+  let answeredPromptCounts = new Map<string, number>();
+  if (resume) {
+    try {
+      const { counts, lines } = await loadAnsweredPromptCounts(absOutPath);
+      answeredPromptCounts = counts;
+      const answered = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+      writeLine(
+        lines > 0
+          ? `INFO: Resume enabled. Found ${answered} answered prompt${answered === 1 ? "" : "s"} in ${lines} existing JSONL line${lines === 1 ? "" : "s"}.`
+          : "INFO: Resume enabled. Output file not found or empty; starting fresh."
+      );
+    } catch (err: any) {
+      console.error(err?.message ?? String(err));
+      process.exit(1);
+      return;
+    }
+  }
 
   const isOpenRouter = isOpenRouterApiBase(apiBase);
   const useFreeKeys = isOpenRouter && openrouterIsFree;
@@ -641,7 +736,18 @@ export async function main(argv = process.argv.slice(2)) {
   });
   const promptReader = rl;
 
-  const out = createWriteStream(absOutPath, { flags: "w" });
+  let prependNewline = false;
+  if (resume) {
+    try {
+      prependNewline = await needsLeadingNewlineForAppend(absOutPath);
+    } catch (err: any) {
+      console.error(err?.message ?? String(err));
+      process.exit(1);
+      return;
+    }
+  }
+
+  const out = createWriteStream(absOutPath, { flags: resume ? "a" : "w" });
   let outputClosed = false;
   const closeOutput = () => {
     if (outputClosed) return;
@@ -693,10 +799,12 @@ export async function main(argv = process.argv.slice(2)) {
 
   let writeQueue = Promise.resolve();
   const writeJsonlLine = (line: string) => {
+    const finalLine = prependNewline ? `\n${line}` : line;
+    prependNewline = false;
     writeQueue = writeQueue.then(
       () =>
         new Promise<void>((resolve, reject) => {
-          out.write(line, (err) => {
+          out.write(finalLine, (err) => {
             if (err) reject(err);
             else resolve();
           });
@@ -788,11 +896,23 @@ export async function main(argv = process.argv.slice(2)) {
   };
 
   let promptIndex = 0;
+  let skippedCount = 0;
   try {
     for await (const line of promptReader) {
       lineNum++;
       const prompt = line.trim();
       if (!prompt) continue;
+
+      if (resume) {
+        const answeredCount = answeredPromptCounts.get(prompt) ?? 0;
+        if (answeredCount > 0) {
+          answeredPromptCounts.set(prompt, answeredCount - 1);
+          skippedCount++;
+          completed++;
+          renderProgress();
+          continue;
+        }
+      }
 
       if (stopScheduling) break;
 
@@ -816,5 +936,8 @@ export async function main(argv = process.argv.slice(2)) {
       err: errCount,
       spentUsd: canTrackSpend ? spentUsd : undefined
     });
+  }
+  if (resume && skippedCount > 0) {
+    writeLine(`INFO: Resume skipped ${skippedCount} already answered prompt${skippedCount === 1 ? "" : "s"}.`);
   }
 }

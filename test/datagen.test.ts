@@ -28,6 +28,16 @@ test("parseArgs defaults concurrent to 1", () => {
   assert.equal(args.concurrent, 1);
 });
 
+test("parseArgs defaults resume to false", () => {
+  const args = parseArgs(["--model", "m", "--prompts", "p.txt"]);
+  assert.equal(args.resume, false);
+});
+
+test("parseArgs parses --resume", () => {
+  const args = parseArgs(["--model", "m", "--prompts", "p.txt", "--resume", "true"]);
+  assert.equal(args.resume, true);
+});
+
 test("parseArgs parses --concurrent", () => {
   const args = parseArgs(["--model", "m", "--prompts", "p.txt", "--concurrent", "3"]);
   assert.equal(args.concurrent, 3);
@@ -81,6 +91,7 @@ test("parseArgs supports --config YAML", async () => {
       "model: m",
       "prompts: p.txt",
       "out: o.jsonl",
+      "resume: true",
       "api: https://openrouter.ai/api/v1",
       "system: |",
       "  line1",
@@ -102,6 +113,7 @@ test("parseArgs supports --config YAML", async () => {
   assert.equal(args.model, "m");
   assert.equal(args.promptsPath, "p.txt");
   assert.equal(args.outPath, "o.jsonl");
+  assert.equal(args.resume, true);
   assert.equal(args.apiBase, "https://openrouter.ai/api/v1");
   assert.equal(args.systemPrompt, "line1\nline2");
   assert.equal(args.storeSystem, false);
