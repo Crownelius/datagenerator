@@ -1,6 +1,6 @@
 import { createReadStream, createWriteStream, promises as fs } from "node:fs";
 import { createInterface } from "node:readline";
-import { basename, dirname, extname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { countNonEmptyLines, ProgressBar } from "./progress.js";
 import { loadConfigRawArgs } from "./config.js";
 import {
@@ -90,7 +90,6 @@ const HELP_TEXT = [
   "  --openrouter.provider <slugs>   OpenRouter provider slugs (comma-separated list).",
   "  --openrouter.providerSort <x>   Provider sorting order (price|throughput|latency).",
   "  --reasoningEffort <level>       Reasoning effort (none|minimal|low|medium|high|xhigh).",
-  "  --dataset-readme [file]         Generate a dataset README template next to the output JSONL or at a custom path.",
   "  --timeout <ms>                  Request timeout in milliseconds.",
   "  --no-progress                   Disable the progress bar.",
   "",
@@ -121,7 +120,6 @@ export type Args = {
   model: string;
   promptsPath: string;
   outPath: string;
-  datasetReadmePath: string | null;
   apiBase: string;
   systemPrompt: string;
   storeSystem: boolean;
@@ -158,129 +156,10 @@ function parseRawArgs(argv: string[]): Record<string, string | boolean> {
   return args;
 }
 
-function normalizeReasoning(reasoning?: string) {
-  return typeof reasoning === "string" && reasoning.trim().length > 0 ? reasoning.trim() : null;
-}
-
-export function resolveDatasetReadmePath(
-  datasetReadmeRaw: string | boolean | undefined,
-  outPath: string
-) {
-  if (datasetReadmeRaw === undefined) return null;
-  if (typeof datasetReadmeRaw === "boolean") {
-    return datasetReadmeRaw ? resolve(dirname(resolve(outPath)), "DATASET_README.md") : null;
-  }
-  const trimmed = datasetReadmeRaw.trim();
-  if (trimmed.length === 0 || trimmed.toLowerCase() === "false") return null;
-  if (trimmed.toLowerCase() === "true") {
-    return resolve(dirname(resolve(outPath)), "DATASET_README.md");
-  }
-  return resolve(trimmed);
-}
-
-function deriveDatasetName(outPath: string) {
-  const stem = basename(outPath, extname(outPath)).trim();
-  if (!stem) return "Generated Dataset";
-  return stem
-    .replace(/[_-]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b\w/g, (char: string) => char.toUpperCase());
-}
-
-function inferSizeCategory(rowCount: number) {
-  if (rowCount < 1_000) return "n<1K";
-  if (rowCount < 10_000) return "1K<n<10K";
-  if (rowCount < 100_000) return "10K<n<100K";
-  if (rowCount < 1_000_000) return "100K<n<1M";
-  return "1M<n<10M";
-}
-
-export function formatAssistantContent(content: string, reasoning?: string) {
-  const normalizedReasoning = normalizeReasoning(reasoning);
-  return normalizedReasoning ? { content, thinking: normalizedReasoning } : { content };
-}
-
-export function generateDatasetReadmeTemplate(input: {
-  model: string;
-  apiBase: string;
-  outPath: string;
-  rowCount: number;
-  systemPrompt: string;
-  storeSystem: boolean;
-  reasoningEffort: string | null;
-}) {
-  const datasetName = deriveDatasetName(input.outPath);
-  const exampleMessages = input.storeSystem && input.systemPrompt.trim().length > 0
-    ? [
-        { role: "system", content: input.systemPrompt },
-        { role: "user", content: "..." },
-        { role: "assistant", thinking: "...", content: "..." }
-      ]
-    : [
-        { role: "user", content: "..." },
-        { role: "assistant", thinking: "...", content: "..." }
-      ];
-  const example = JSON.stringify({ messages: exampleMessages }, null, 2);
-  const reasoningLine = input.reasoningEffort
-    ? `- Reasoning effort: \`${input.reasoningEffort}\``
-    : "- Reasoning effort: not set";
-
-  return [
-    "---",
-    "language:",
-    "- en",
-    "license: other",
-    "task_categories:",
-    "- text-generation",
-    "- conversational",
-    "tags:",
-    "- synthetic",
-    "- chat",
-    "- reasoning",
-    `size_categories:\n- ${inferSizeCategory(input.rowCount)}`,
-    `pretty_name: ${JSON.stringify(datasetName)}`,
-    "---",
-    "",
-    `# ${datasetName}`,
-    "",
-    "This dataset was generated with `@teichai/datagen`.",
-    "",
-    "## Dataset Summary",
-    "",
-    `- Model: \`${input.model}\``,
-    `- API base: \`${input.apiBase}\``,
-    `- Rows: ${input.rowCount}`,
-    `- Output file: \`${basename(input.outPath)}\``,
-    `- Stores system prompt: ${input.storeSystem ? "yes" : "no"}`,
-    reasoningLine,
-    "",
-    "## Format",
-    "",
-    "Each line is a JSON object with a `messages` array.",
-    "Assistant reasoning is stored in a separate `thinking` field when present.",
-    "",
-    "## Example",
-    "",
-    "```json",
-    example,
-    "```",
-    ""
-  ].join("\n");
-}
-
-export function buildAssistantMessage(content: string, reasoning?: string) {
-  return { role: "assistant" as const, ...formatAssistantContent(content, reasoning) };
-}
-
 function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
   const model = (args.model as string) || "";
   const promptsPath = (args.prompts as string) || "";
   const outPath = (args.out as string) || "dataset.jsonl";
-  const datasetReadmePath = resolveDatasetReadmePath(
-    args["dataset-readme"] ?? args.datasetReadme,
-    outPath
-  );
   const apiBase = (args.api as string) || "https://openrouter.ai/api/v1";
   const systemPrompt = (args.system as string) || "";
   const storeSystemRaw = args["store-system"];
@@ -354,7 +233,6 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
     model,
     promptsPath,
     outPath,
-    datasetReadmePath,
     apiBase,
     systemPrompt,
     storeSystem,
@@ -399,25 +277,29 @@ export function buildRequestMessages(
     : [{ role: "user" as const, content: userPrompt }];
 }
 
+export function formatAssistantContent(content: string, reasoning?: string) {
+  return typeof reasoning === "string" && reasoning.trim().length > 0
+    ? `<think>${reasoning}</think>\n${content}`
+    : content;
+}
+
 export function buildOutputMessages(
   systemPrompt: string,
   userPrompt: string,
   assistantContent: string,
-  storeSystem: boolean,
-  reasoning?: string
+  storeSystem: boolean
 ) {
-  const assistantMessage = buildAssistantMessage(assistantContent, reasoning);
   const hasSystem = systemPrompt.trim().length > 0;
   if (hasSystem && storeSystem) {
     return [
       { role: "system" as const, content: systemPrompt },
       { role: "user" as const, content: userPrompt },
-      assistantMessage
+      { role: "assistant" as const, content: assistantContent }
     ];
   }
   return [
     { role: "user" as const, content: userPrompt },
-    assistantMessage
+    { role: "assistant" as const, content: assistantContent }
   ];
 }
 
@@ -547,7 +429,6 @@ export async function main(argv = process.argv.slice(2)) {
     model,
     promptsPath,
     outPath,
-    datasetReadmePath,
     apiBase,
     systemPrompt,
     storeSystem,
@@ -745,7 +626,7 @@ export async function main(argv = process.argv.slice(2)) {
     writeQueue = writeQueue.then(
       () =>
         new Promise<void>((resolve, reject) => {
-          out.write(line, (err?: Error | null) => {
+          out.write(line, (err) => {
             if (err) reject(err);
             else resolve();
           });
@@ -802,12 +683,12 @@ export async function main(argv = process.argv.slice(2)) {
           spentUsd += calculateOpenRouterSpendUSD(pricing, usage);
         }
 
+        const assistantContent = formatAssistantContent(content, reasoning);
         const messages = buildOutputMessages(
           systemPrompt,
           prompt,
-          content,
-          storeSystem,
-          reasoning
+          assistantContent,
+          storeSystem
         );
 
         await writeJsonlLine(JSON.stringify({ messages }) + "\n");
@@ -850,27 +731,7 @@ export async function main(argv = process.argv.slice(2)) {
   }
 
   await cleanupKeys();
-  await new Promise<void>((resolveClose, rejectClose) => {
-    out.end((err?: Error | null) => {
-      if (err) rejectClose(err);
-      else resolveClose();
-    });
-  });
-
-  if (datasetReadmePath) {
-    const template = generateDatasetReadmeTemplate({
-      model,
-      apiBase,
-      outPath: absOutPath,
-      rowCount: okCount,
-      systemPrompt,
-      storeSystem,
-      reasoningEffort
-    });
-    await fs.writeFile(datasetReadmePath, template, "utf8");
-    writeLine(`Wrote dataset README template to ${datasetReadmePath}`);
-  }
-
+  out.end();
   if (bar) {
     bar.finish(completed, {
       ok: okCount,

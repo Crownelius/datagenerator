@@ -8,8 +8,6 @@ import {
   buildRequestMessages,
   buildOutputMessages,
   formatAssistantContent,
-  generateDatasetReadmeTemplate,
-  resolveDatasetReadmePath,
   callOpenRouter,
   ensureReadableFile
 } from "../src/index.js";
@@ -23,7 +21,6 @@ test("parseArgs requires model and prompts", () => {
 test("parseArgs defaults store-system to true", () => {
   const args = parseArgs(["--model", "m", "--prompts", "p.txt"]);
   assert.equal(args.storeSystem, true);
-  assert.equal(args.datasetReadmePath, null);
 });
 
 test("parseArgs defaults concurrent to 1", () => {
@@ -61,19 +58,6 @@ test("parseArgs parses --reasoningEffort", () => {
     "high"
   ]);
   assert.equal(args.reasoningEffort, "high");
-});
-
-test("parseArgs parses --dataset-readme", () => {
-  const args = parseArgs([
-    "--model",
-    "m",
-    "--prompts",
-    "p.txt",
-    "--out",
-    "nested/out.jsonl",
-    "--dataset-readme"
-  ]);
-  assert.match(args.datasetReadmePath ?? "", /nested\/DATASET_README\.md$/);
 });
 
 test("parseArgs parses --openrouter.isFree", () => {
@@ -138,13 +122,6 @@ test("parseArgs lets CLI override config", async () => {
   assert.equal(args.promptsPath, "p.txt");
 });
 
-test("resolveDatasetReadmePath handles booleans and custom paths", () => {
-  assert.equal(resolveDatasetReadmePath(undefined, "dataset.jsonl"), null);
-  assert.match(resolveDatasetReadmePath(true, "nested/out.jsonl") ?? "", /nested\/DATASET_README\.md$/);
-  assert.equal(resolveDatasetReadmePath(false, "nested/out.jsonl"), null);
-  assert.match(resolveDatasetReadmePath("custom/README.md", "nested/out.jsonl") ?? "", /custom\/README\.md$/);
-});
-
 test("buildRequestMessages omits system when empty", () => {
   const msgs = buildRequestMessages("", "hi");
   assert.deepEqual(msgs, [{ role: "user", content: "hi" }]);
@@ -165,33 +142,9 @@ test("buildOutputMessages respects storeSystem flag", () => {
   ]);
 });
 
-test("formatAssistantContent stores reasoning in thinking", () => {
+test("formatAssistantContent wraps reasoning in <think>", () => {
   const out = formatAssistantContent("answer", "reasoning here");
-  assert.deepEqual(out, { content: "answer", thinking: "reasoning here" });
-});
-
-test("buildOutputMessages includes thinking when present", () => {
-  const messages = buildOutputMessages("sys", "u", "a", true, "reasoning here");
-  assert.deepEqual(messages, [
-    { role: "system", content: "sys" },
-    { role: "user", content: "u" },
-    { role: "assistant", content: "a", thinking: "reasoning here" }
-  ]);
-});
-
-test("generateDatasetReadmeTemplate reflects the aligned chat format", () => {
-  const readme = generateDatasetReadmeTemplate({
-    model: "openai/gpt-4o-mini",
-    apiBase: "https://openrouter.ai/api/v1",
-    outPath: "/tmp/my_dataset.jsonl",
-    rowCount: 887,
-    systemPrompt: "You are a helpful assistant",
-    storeSystem: true,
-    reasoningEffort: "high"
-  });
-  assert.match(readme, /Assistant reasoning is stored in a separate `thinking` field/);
-  assert.match(readme, /"thinking": "\.\.\."/);
-  assert.match(readme, /Rows: 887/);
+  assert.equal(out, "<think>reasoning here</think>\nanswer");
 });
 
 test("callOpenRouter sends correct payload and parses reasoning", async () => {
