@@ -8,6 +8,7 @@ import {
   buildRequestMessages,
   buildOutputMessages,
   formatAssistantContent,
+  formatAssistantContentOld,
   generateDatasetReadmeTemplate,
   resolveDatasetReadmePath,
   callOpenRouter,
@@ -61,6 +62,17 @@ test("parseArgs parses --reasoningEffort", () => {
     "high"
   ]);
   assert.equal(args.reasoningEffort, "high");
+});
+
+test("parseArgs parses --save-old-format from CLI", () => {
+  const args = parseArgs([
+    "--model",
+    "m",
+    "--prompts",
+    "p.txt",
+    "--save-old-format"
+  ]);
+  assert.equal(args.saveOldFormat, true);
 });
 
 test("parseArgs parses --dataset-readme", () => {
@@ -127,6 +139,7 @@ test("parseArgs supports --config YAML", async () => {
   assert.equal(args.openrouterProviderSort, "throughput");
   assert.equal(args.reasoningEffort, "high");
   assert.equal(args.progress, false);
+  assert.equal(args.saveOldFormat, false);
 });
 
 test("parseArgs lets CLI override config", async () => {
@@ -136,6 +149,21 @@ test("parseArgs lets CLI override config", async () => {
   const args = parseArgs(["--config", configPath, "--model", "b"]);
   assert.equal(args.model, "b");
   assert.equal(args.promptsPath, "p.txt");
+});
+
+test("parseArgs ignores save-old-format in config and only honors CLI", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "datagen-"));
+  const configPath = join(dir, "config.yaml");
+  await writeFile(
+    configPath,
+    ["model: a", "prompts: p.txt", "save-old-format: true", ""].join("\n")
+  );
+
+  const fromConfigOnly = parseArgs(["--config", configPath]);
+  assert.equal(fromConfigOnly.saveOldFormat, false);
+
+  const fromCli = parseArgs(["--config", configPath, "--save-old-format"]);
+  assert.equal(fromCli.saveOldFormat, true);
 });
 
 test("resolveDatasetReadmePath handles booleans and custom paths", () => {
@@ -170,12 +198,26 @@ test("formatAssistantContent stores reasoning in thinking", () => {
   assert.deepEqual(out, { content: "answer", thinking: "reasoning here" });
 });
 
+test("formatAssistantContentOld wraps reasoning in <think>", () => {
+  const out = formatAssistantContentOld("answer", "reasoning here");
+  assert.equal(out, "<think>reasoning here</think>\nanswer");
+});
+
 test("buildOutputMessages includes thinking when present", () => {
   const messages = buildOutputMessages("sys", "u", "a", true, "reasoning here");
   assert.deepEqual(messages, [
     { role: "system", content: "sys" },
     { role: "user", content: "u" },
     { role: "assistant", content: "a", thinking: "reasoning here" }
+  ]);
+});
+
+test("buildOutputMessages uses legacy assistant format when requested", () => {
+  const messages = buildOutputMessages("sys", "u", "a", true, "reasoning here", true);
+  assert.deepEqual(messages, [
+    { role: "system", content: "sys" },
+    { role: "user", content: "u" },
+    { role: "assistant", content: "<think>reasoning here</think>\na" }
   ]);
 });
 
@@ -187,11 +229,27 @@ test("generateDatasetReadmeTemplate reflects the aligned chat format", () => {
     rowCount: 887,
     systemPrompt: "You are a helpful assistant",
     storeSystem: true,
-    reasoningEffort: "high"
+    reasoningEffort: "high",
+    saveOldFormat: false
   });
   assert.match(readme, /Assistant reasoning is stored in a separate `thinking` field/);
   assert.match(readme, /"thinking": "\.\.\."/);
   assert.match(readme, /Rows: 887/);
+});
+
+test("generateDatasetReadmeTemplate reflects the legacy assistant format", () => {
+  const readme = generateDatasetReadmeTemplate({
+    model: "openai/gpt-4o-mini",
+    apiBase: "https://openrouter.ai/api/v1",
+    outPath: "/tmp/my_dataset.jsonl",
+    rowCount: 887,
+    systemPrompt: "You are a helpful assistant",
+    storeSystem: true,
+    reasoningEffort: "high",
+    saveOldFormat: true
+  });
+  assert.match(readme, /legacy `<think>` tags/);
+  assert.match(readme, /<think>\.\.\.<\/think>\\n\.\.\./);
 });
 
 test("callOpenRouter sends correct payload and parses reasoning", async () => {
