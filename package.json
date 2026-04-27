@@ -1,7 +1,7 @@
 {
-  "name": "@teichai/datagen",
-  "version": "0.1.12",
-  "description": "A easy to use CLI to generate JSONL datasets from a TXT file using LLMs.",
+  "name": "@crownelius/datagenerator",
+  "version": "0.2.0",
+  "description": "CLI for generating JSONL datasets from a TXT file or an arxiv (HF Hub) stream using LLMs. Fork of @teichai/datagen with multi-turn conversation templates and an arxiv source.",
   "type": "module",
   "license": "Apache-2.0",
   "keywords": [
@@ -9,9 +9,12 @@
     "dataset",
     "jsonl",
     "llm",
-    "openrouter"
+    "openrouter",
+    "arxiv",
+    "multi-turn"
   ],
   "bin": {
+    "datagenerator": "dist/cli.js",
     "datagen": "dist/cli.js"
   },
   "files": [

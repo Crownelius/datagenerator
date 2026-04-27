@@ -14,6 +14,8 @@ import {
 } from "./openrouter.js";
 import packageJson from "../package.json" with { type: "json" };
 import { maybeNotifyNewVersion } from "./update-check.js";
+import { loadTemplate, expandPlaceholders, type Template, type Record as TemplateRecord } from "./template.js";
+import { streamArxivRows, type ArxivRow } from "./sources/arxiv.js";
 
 function trimTrailingZeros(num: string): string {
   if (!num.includes(".")) return num;
@@ -74,18 +76,19 @@ const HELP_TEXT = [
   `${CLI_NAME} ${CLI_VERSION}`,
   "",
   `Usage: ${CLI_NAME} --model <model> --prompts <file> [options]`,
+  `       ${CLI_NAME} --model <model> --source arxiv --template <yaml> [options]`,
   "",
   "Options:",
   "  --help                          Show this help message and exit.",
   "  --version                       Print the CLI version and exit.",
   "  --config <file>                 Load options from a YAML/JSON config file.",
   "  --model <name>                  Model name to use for completions.",
-  "  --prompts <file>                Path to a file where each line is a prompt.",
+  "  --prompts <file>                Path to a file where each line is a prompt (txt source only).",
   "  --out <file>                    Output JSONL file (default: dataset.jsonl).",
   "  --api <baseUrl>                 API base URL (default: https://openrouter.ai/api/v1).",
   "  --system <text>                 Optional system prompt to include.",
   "  --store-system true|false       Whether to emit the system prompt in the dataset (default: true).",
-  "  --concurrent <num>              Number of parallel requests (default: 1).",
+  "  --concurrent <num>              Number of parallel records (default: 1).",
   "  --openrouter.isFree true|false  Treat API_KEY as a management key for free models.",
   "  --openrouter.provider <slugs>   OpenRouter provider slugs (comma-separated list).",
   "  --openrouter.providerSort <x>   Provider sorting order (price|throughput|latency).",
@@ -94,6 +97,15 @@ const HELP_TEXT = [
   "  --dataset-readme [file]         Generate a dataset README template next to the output JSONL or at a custom path.",
   "  --timeout <ms>                  Request timeout in milliseconds.",
   "  --no-progress                   Disable the progress bar.",
+  "",
+  "Multi-turn / arxiv source options:",
+  "  --source <type>                 Input source: txt (default) | arxiv",
+  "  --template <file>               YAML/JSON template defining a multi-turn conversation per record.",
+  "  --source.dataset <id>           HF Hub dataset id for arxiv source (default: common-pile/arxiv_papers).",
+  "  --source.config <name>          HF Hub dataset config (default: default).",
+  "  --source.split <name>           HF Hub dataset split (default: train).",
+  "  --source.limit <n>              Maximum records to process from the source.",
+  "  --source.offset <n>             Skip the first N records of the source.",
   "",
   'Environment: Set the API_KEY env var to your OpenRouter API key before running.',
   ""
@@ -134,6 +146,13 @@ export type Args = {
   reasoningEffort: string | null;
   saveOldFormat: boolean;
   timeout: number | null;
+  source: "txt" | "arxiv";
+  templatePath: string | null;
+  sourceDataset: string | null;
+  sourceConfig: string | null;
+  sourceSplit: string | null;
+  sourceLimit: number | null;
+  sourceOffset: number | null;
 };
 
 function parseRawArgs(argv: string[]): Record<string, string | boolean> {
@@ -372,10 +391,62 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
       ? timeoutParsed
       : null;
 
-  if (!model || !promptsPath) {
+  const sourceRaw = args.source;
+  const sourceStr =
+    typeof sourceRaw === "string" && sourceRaw.trim().length > 0
+      ? sourceRaw.trim().toLowerCase()
+      : "txt";
+  if (sourceStr !== "txt" && sourceStr !== "arxiv") {
+    throw new Error(`Unsupported --source: ${sourceStr}. Expected "txt" or "arxiv".`);
+  }
+  const source = sourceStr as "txt" | "arxiv";
+
+  const templateRaw = args.template;
+  const templatePath =
+    typeof templateRaw === "string" && templateRaw.trim().length > 0
+      ? templateRaw.trim()
+      : null;
+
+  const sourceDatasetRaw = args["source.dataset"];
+  const sourceDataset =
+    typeof sourceDatasetRaw === "string" && sourceDatasetRaw.trim().length > 0
+      ? sourceDatasetRaw.trim()
+      : null;
+  const sourceConfigRaw = args["source.config"];
+  const sourceConfig =
+    typeof sourceConfigRaw === "string" && sourceConfigRaw.trim().length > 0
+      ? sourceConfigRaw.trim()
+      : null;
+  const sourceSplitRaw = args["source.split"];
+  const sourceSplit =
+    typeof sourceSplitRaw === "string" && sourceSplitRaw.trim().length > 0
+      ? sourceSplitRaw.trim()
+      : null;
+  const sourceLimitRaw = args["source.limit"];
+  const sourceLimitParsed =
+    sourceLimitRaw === undefined ? null : Math.floor(Number(sourceLimitRaw));
+  const sourceLimit =
+    sourceLimitParsed !== null && Number.isFinite(sourceLimitParsed) && sourceLimitParsed > 0
+      ? sourceLimitParsed
+      : null;
+  const sourceOffsetRaw = args["source.offset"];
+  const sourceOffsetParsed =
+    sourceOffsetRaw === undefined ? null : Math.floor(Number(sourceOffsetRaw));
+  const sourceOffset =
+    sourceOffsetParsed !== null && Number.isFinite(sourceOffsetParsed) && sourceOffsetParsed >= 0
+      ? sourceOffsetParsed
+      : null;
+
+  if (!model) {
     throw new Error(
       `${USAGE_LINE} [--out dataset.jsonl] [--api https://openrouter.ai/api/v1] [--system "..."] [--store-system true|false] [--concurrent 1] [--openrouter.isFree true|false] [--openrouter.provider openai,anthropic] [--openrouter.providerSort price|throughput|latency] [--reasoningEffort low|medium|high] [--save-old-format] [--timeout <ms>] [--no-progress]`
     );
+  }
+  if (source === "txt" && !promptsPath) {
+    throw new Error(`${USAGE_LINE} (--prompts is required for --source txt)`);
+  }
+  if (source === "arxiv" && !templatePath) {
+    throw new Error(`${USAGE_LINE} (--template <yaml> is required for --source arxiv)`);
   }
 
   return {
@@ -393,7 +464,14 @@ function parseArgsFromRaw(args: Record<string, string | boolean>): Args {
     openrouterIsFree,
     reasoningEffort,
     saveOldFormat,
-    timeout
+    timeout,
+    source,
+    templatePath,
+    sourceDataset,
+    sourceConfig,
+    sourceSplit,
+    sourceLimit,
+    sourceOffset
   };
 }
 
@@ -456,18 +534,16 @@ export function buildOutputMessages(
   ];
 }
 
-export async function callOpenRouter(
+export async function callOpenRouterMessages(
   apiBase: string,
   apiKey: string,
   model: string,
-  systemPrompt: string,
-  userPrompt: string,
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string }>,
   provider?: { order?: string[]; sort?: string },
   reasoningEffort?: string | null,
   timeout?: number | null
 ): Promise<{ content: string; reasoning?: string; usage?: OpenRouterUsage }> {
   const url = `${apiBase.replace(/\/$/, "")}/chat/completions`;
-  const messages = buildRequestMessages(systemPrompt, userPrompt);
 
   const providerPref =
     provider && (Array.isArray(provider.order) || typeof provider.sort === "string")
@@ -534,6 +610,65 @@ export async function callOpenRouter(
   }
 }
 
+export async function callOpenRouter(
+  apiBase: string,
+  apiKey: string,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  provider?: { order?: string[]; sort?: string },
+  reasoningEffort?: string | null,
+  timeout?: number | null
+): Promise<{ content: string; reasoning?: string; usage?: OpenRouterUsage }> {
+  const messages = buildRequestMessages(systemPrompt, userPrompt);
+  return callOpenRouterMessages(apiBase, apiKey, model, messages, provider, reasoningEffort, timeout);
+}
+
+export async function executeMultiTurn(
+  apiBase: string,
+  apiKey: string,
+  model: string,
+  template: Template,
+  record: TemplateRecord,
+  saveOldFormat: boolean,
+  storeSystem: boolean,
+  provider?: { order?: string[]; sort?: string },
+  reasoningEffort?: string | null,
+  timeout?: number | null
+): Promise<{
+  messages: Array<{ role: "system" | "user" | "assistant"; content: string; thinking?: string }>;
+  usageTotals: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
+}> {
+  const usageTotals = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  const conversation: Array<{ role: "system" | "user" | "assistant"; content: string }> = [];
+  const hasSystem = typeof template.system === "string" && template.system.trim().length > 0;
+  if (hasSystem) {
+    conversation.push({ role: "system", content: template.system as string });
+  }
+  const finalMessages: Array<{ role: "system" | "user" | "assistant"; content: string; thinking?: string }> = [];
+  if (hasSystem && storeSystem) {
+    finalMessages.push({ role: "system", content: template.system as string });
+  }
+  for (const turnTemplate of template.turns) {
+    const userContent = expandPlaceholders(turnTemplate, record);
+    conversation.push({ role: "user", content: userContent });
+    const { content, reasoning, usage } = await callOpenRouterMessages(
+      apiBase, apiKey, model, conversation, provider, reasoningEffort, timeout
+    );
+    const assistantMsg = buildAssistantMessage(content, reasoning, saveOldFormat) as
+      { role: "assistant"; content: string; thinking?: string };
+    conversation.push({ role: "assistant", content: assistantMsg.content });
+    finalMessages.push({ role: "user", content: userContent });
+    finalMessages.push(assistantMsg);
+    if (usage) {
+      usageTotals.prompt_tokens += Number(usage.prompt_tokens ?? 0);
+      usageTotals.completion_tokens += Number(usage.completion_tokens ?? 0);
+      usageTotals.total_tokens += Number(usage.total_tokens ?? 0);
+    }
+  }
+  return { messages: finalMessages, usageTotals };
+}
+
 export async function ensureReadableFile(filePath: string) {
   let st;
   try {
@@ -593,7 +728,14 @@ export async function main(argv = process.argv.slice(2)) {
     openrouterIsFree,
     reasoningEffort,
     saveOldFormat,
-    timeout
+    timeout,
+    source,
+    templatePath,
+    sourceDataset,
+    sourceConfig,
+    sourceSplit,
+    sourceLimit,
+    sourceOffset
   } = parsed;
 
   const apiKey = process.env.API_KEY;
@@ -602,24 +744,46 @@ export async function main(argv = process.argv.slice(2)) {
     process.exit(1);
   }
 
-  const absPromptsPath = resolve(promptsPath);
+  const absPromptsPath = source === "txt" ? resolve(promptsPath) : "";
   const absOutPath = resolve(outPath);
 
-  try {
-    await ensureReadableFile(absPromptsPath);
-  } catch (err: any) {
-    console.error(err?.message ?? String(err));
-    process.exit(1);
-    return;
+  let template: Template | null = null;
+  if (source === "arxiv") {
+    if (!templatePath) {
+      console.error("--template is required when --source arxiv is set.");
+      process.exit(1);
+      return;
+    }
+    try {
+      template = loadTemplate(resolve(templatePath));
+    } catch (err: any) {
+      console.error(`Failed to load template ${templatePath}: ${err?.message ?? String(err)}`);
+      process.exit(1);
+      return;
+    }
+  }
+
+  if (source === "txt") {
+    try {
+      await ensureReadableFile(absPromptsPath);
+    } catch (err: any) {
+      console.error(err?.message ?? String(err));
+      process.exit(1);
+      return;
+    }
   }
 
   const useProgress = progress && Boolean(process.stderr.isTTY);
   let totalPrompts = 0;
   if (useProgress) {
-    try {
-      totalPrompts = await countNonEmptyLines(absPromptsPath);
-    } catch {
-      totalPrompts = 0;
+    if (source === "txt") {
+      try {
+        totalPrompts = await countNonEmptyLines(absPromptsPath);
+      } catch {
+        totalPrompts = 0;
+      }
+    } else if (source === "arxiv") {
+      totalPrompts = sourceLimit ?? 0;
     }
   }
   const bar =
@@ -752,11 +916,6 @@ export async function main(argv = process.argv.slice(2)) {
     }
   }
 
-  const rl = createInterface({
-    input: createReadStream(absPromptsPath),
-    crlfDelay: Infinity
-  });
-
   const out = createWriteStream(absOutPath, { flags: "w" });
 
   let lineNum = 0;
@@ -871,15 +1030,95 @@ export async function main(argv = process.argv.slice(2)) {
     }
   };
 
-  let promptIndex = 0;
-  for await (const line of rl) {
-    lineNum++;
-    const prompt = line.trim();
-    if (!prompt) continue;
+  const scheduleArxiv = (record: ArxivRow) => {
+    const p = (async () => {
+      let requestKey = requestKeys[0];
+      if (useKeyPool) {
+        requestKey = await acquireKey();
+      }
+      try {
+        const tplRecord: TemplateRecord = {
+          id: record.id,
+          text: record.text,
+          title: record.title ?? "",
+          source: record.source
+        };
+        for (const [k, v] of Object.entries(record.metadata)) {
+          if (typeof v === "string" || typeof v === "number" || typeof v === "boolean" || v === null) {
+            tplRecord[k] = v as any;
+          }
+        }
+        const { messages, usageTotals } = await executeMultiTurn(
+          apiBase,
+          requestKey,
+          model,
+          template as Template,
+          tplRecord,
+          saveOldFormat,
+          storeSystem,
+          providerPref,
+          reasoningEffort,
+          timeout
+        );
 
-    await waitForSlot();
-    schedule(promptIndex, lineNum, prompt);
-    promptIndex++;
+        if (canTrackSpend && pricing) {
+          spentUsd += calculateOpenRouterSpendUSD(pricing, usageTotals as any);
+        }
+
+        const outRow: { messages: typeof messages; metadata?: { [k: string]: any } } = { messages };
+        const tpl = template as Template;
+        if (tpl.metadataKeys && tpl.metadataKeys.length > 0) {
+          const meta: { [k: string]: any } = {};
+          for (const k of tpl.metadataKeys) {
+            const v = (record as any)[k] ?? record.metadata[k];
+            if (v !== undefined) meta[k] = v;
+          }
+          if (Object.keys(meta).length > 0) outRow.metadata = meta;
+        }
+
+        await writeJsonlLine(JSON.stringify(outRow) + "\n");
+        okCount++;
+      } catch (err: any) {
+        const msg = `ERR ${record.id || "?"}: ${err?.message ?? String(err)}`;
+        if (bar) bar.writeLine(msg);
+        else process.stderr.write(msg + "\n");
+        errCount++;
+      } finally {
+        releaseKey(requestKey);
+        completed++;
+        renderProgress();
+      }
+    })();
+    inFlight.add(p);
+    p.finally(() => inFlight.delete(p));
+  };
+
+  if (source === "arxiv") {
+    for await (const row of streamArxivRows({
+      dataset: sourceDataset ?? undefined,
+      config: sourceConfig ?? undefined,
+      split: sourceSplit ?? undefined,
+      offset: sourceOffset ?? undefined,
+      limit: sourceLimit ?? undefined
+    })) {
+      await waitForSlot();
+      scheduleArxiv(row);
+    }
+  } else {
+    const rl = createInterface({
+      input: createReadStream(absPromptsPath),
+      crlfDelay: Infinity
+    });
+    let promptIndex = 0;
+    for await (const line of rl) {
+      lineNum++;
+      const prompt = line.trim();
+      if (!prompt) continue;
+
+      await waitForSlot();
+      schedule(promptIndex, lineNum, prompt);
+      promptIndex++;
+    }
   }
 
   while (inFlight.size > 0) {

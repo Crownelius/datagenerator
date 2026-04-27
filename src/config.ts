@@ -94,7 +94,7 @@ function parseScalar(raw: string): JsonValue {
   return v;
 }
 
-function parseYaml(text: string): JsonObject {
+export function parseYaml(text: string): JsonObject {
   const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/);
   let i = 0;
 
@@ -233,7 +233,14 @@ const CONFIG_KEY_ALIASES: Record<string, string> = {
   storeSystem: "store-system",
   noProgress: "no-progress",
   openrouterProviderOrder: "openrouter.provider",
-  openrouterProviderSort: "openrouter.providerSort"
+  openrouterProviderSort: "openrouter.providerSort",
+  sourceType: "source",
+  templatePath: "template",
+  sourceDataset: "source.dataset",
+  sourceConfig: "source.config",
+  sourceSplit: "source.split",
+  sourceLimit: "source.limit",
+  sourceOffset: "source.offset"
 };
 
 function normalizeConfigKey(key: string): string {

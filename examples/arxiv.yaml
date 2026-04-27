@@ -1,0 +1,19 @@
+system: |
+  You are a senior research scientist with deep expertise across machine learning, physics, mathematics, and the natural sciences. You read arxiv papers carefully and respond with detailed, technically grounded analysis. Be specific about methods, claims, evidence, and limitations. When pointing out flaws or proposing improvements, be concrete — cite the paper's specific assumptions, experimental choices, or claims rather than offering generic critique.
+
+turns:
+  - |
+    Below is the text of arxiv paper {id}.
+
+    ---
+    {text}
+    ---
+
+    Explain this arxiv paper in detail. Cover: (1) the problem the authors are solving, (2) the key technical contributions and how they differ from prior work, (3) the experimental setup and headline results, and (4) the main claims. Be technically thorough.
+  - "How can this paper improve the field in which it's published? Be specific about which downstream methods, applications, or open problems it advances, and why."
+  - "What do you think are the flaws of this paper? Consider methodological choices, experimental design, statistical reporting, scope of claims, missing baselines or ablations, and any unstated assumptions."
+  - "What would you do to improve on this idea? Propose concrete extensions, alternative designs, or follow-up experiments. Be specific enough that another researcher could implement what you suggest."
+
+metadataKeys:
+  - id
+  - title
