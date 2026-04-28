@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+
+# Workdir produced by builds (keep small smoke outputs but ignore large ones)
+workdir/
+*.parquet
+pdfs/
+pdfs_done/
+*.jsonl
+!tests/fixtures/*.jsonl
+
+# Editor
+.idea/
+.vscode/
+*.swp
+.DS_Store
