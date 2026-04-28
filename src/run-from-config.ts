@@ -3,7 +3,6 @@ import { resolve } from "node:path";
 import { loadConfig, type DataclawConfig, type SourceConfig } from "./dataclaw-config.js";
 import {
   callOpenRouterMessages,
-  buildAssistantMessage,
   executeMultiTurn,
   buildOutputMessages
 } from "./index.js";
@@ -11,60 +10,73 @@ import { loadTemplate, expandPlaceholders, type Template, type Record as Templat
 import { streamArxivRows, type ArxivRow } from "./sources/arxiv.js";
 import {
   createOpenRouterApiKey,
-  deleteOpenRouterApiKey,
-  isOpenRouterApiBase
+  deleteOpenRouterApiKey
 } from "./openrouter.js";
 import { Runtime, type RuntimeState } from "./runtime.js";
 import { startRepl } from "./repl.js";
+import { resolveProvider } from "./providers.js";
 
 type RunOpts = { configPath?: string };
 
-type ProviderRuntimeKeys = {
+type ProviderKeyPool = {
+  apiBase: string;
   keys: string[];
   spawnedHashes: string[];
   managementKey?: string;
-  apiBase: string;
 };
 
-async function setupOpenRouterKeys(cfg: DataclawConfig): Promise<ProviderRuntimeKeys> {
-  const apiBase = cfg.api ?? "https://openrouter.ai/api/v1";
-  const provider = cfg.providers["openrouter"];
-  if (!provider) {
-    throw new Error("No 'openrouter' provider configured. Run 'datagen onboard'.");
-  }
+type ProviderKeyPools = { [providerName: string]: ProviderKeyPool };
 
-  if (provider.keys && provider.keys.length > 0) {
-    return { keys: [...provider.keys], spawnedHashes: [], apiBase };
-  }
+async function setupProviderKeys(cfg: DataclawConfig): Promise<ProviderKeyPools> {
+  const pools: ProviderKeyPools = {};
+  for (const [name, provider] of Object.entries(cfg.providers)) {
+    const spec = resolveProvider(name);
+    const apiBase = name === "openrouter" && cfg.api ? cfg.api : spec.apiBase;
 
-  if (provider.management_key) {
-    const count = provider.auto_spawn_count ?? 10;
-    console.log(`Spawning ${count} OpenRouter sub-keys from management key...`);
-    const baseName = `dataclaw-${Date.now()}`;
-    const created = await Promise.all(
-      Array.from({ length: count }, (_, i) =>
-        createOpenRouterApiKey(apiBase, provider.management_key as string, `${baseName}-${i + 1}`)
-      )
-    );
-    return {
-      keys: created.map((c) => c.key),
-      spawnedHashes: created.map((c) => c.hash).filter((h): h is string => typeof h === "string"),
-      managementKey: provider.management_key,
-      apiBase
-    };
-  }
+    if (provider.keys && provider.keys.length > 0) {
+      pools[name] = { apiBase, keys: [...provider.keys], spawnedHashes: [] };
+      continue;
+    }
 
-  throw new Error("OpenRouter provider has neither `keys` nor `management_key`. Run 'datagen onboard'.");
+    if (provider.management_key) {
+      if (!spec.supportsKeySpawning) {
+        throw new Error(
+          `Provider "${name}" does not support management_key auto-spawn. ` +
+          `Use \`keys: [...]\` instead.`
+        );
+      }
+      const count = provider.auto_spawn_count ?? 10;
+      console.log(`[${name}] Spawning ${count} sub-keys from management key...`);
+      const baseName = `dataclaw-${Date.now()}`;
+      const created = await Promise.all(
+        Array.from({ length: count }, (_, i) =>
+          createOpenRouterApiKey(apiBase, provider.management_key as string, `${baseName}-${i + 1}`)
+        )
+      );
+      pools[name] = {
+        apiBase,
+        keys: created.map((c) => c.key),
+        spawnedHashes: created.map((c) => c.hash).filter((h): h is string => typeof h === "string"),
+        managementKey: provider.management_key
+      };
+      continue;
+    }
+
+    throw new Error(`Provider "${name}" has neither \`keys\` nor \`management_key\`. Run 'datagen onboard'.`);
+  }
+  return pools;
 }
 
-async function teardownKeys(keys: ProviderRuntimeKeys): Promise<void> {
-  if (!keys.managementKey || keys.spawnedHashes.length === 0) return;
-  console.log("Cleaning up spawned OpenRouter sub-keys...");
-  for (const hash of keys.spawnedHashes) {
-    try {
-      await deleteOpenRouterApiKey(keys.apiBase, keys.managementKey, hash);
-    } catch (err) {
-      console.warn(`Failed to delete sub-key ${hash}: ${(err as any)?.message ?? err}`);
+async function teardownAllPools(pools: ProviderKeyPools): Promise<void> {
+  for (const [name, pool] of Object.entries(pools)) {
+    if (!pool.managementKey || pool.spawnedHashes.length === 0) continue;
+    console.log(`[${name}] Cleaning up ${pool.spawnedHashes.length} spawned sub-keys...`);
+    for (const hash of pool.spawnedHashes) {
+      try {
+        await deleteOpenRouterApiKey(pool.apiBase, pool.managementKey, hash);
+      } catch (err) {
+        console.warn(`[${name}] Failed to delete sub-key ${hash}: ${(err as any)?.message ?? err}`);
+      }
     }
   }
 }
@@ -89,14 +101,19 @@ async function runOneSource(
   runtime: Runtime,
   cfg: DataclawConfig,
   template: Template | null,
-  apiBase: string,
-  keys: string[],
+  pools: ProviderKeyPools,
   outStream: ReturnType<typeof createWriteStream>,
   stats: { ok: number; err: number; inFlight: number; total: number; spentUsd: number }
 ): Promise<void> {
+  const providerName = src.provider ?? "openrouter";
+  const pool = pools[providerName];
+  if (!pool) {
+    throw new Error(`Source "${src.name}" requires provider "${providerName}" but no keys are configured.`);
+  }
+  const sourceModel = src.model ?? cfg.model;
   let keyIdx = 0;
   const acquireKey = (): string => {
-    const k = keys[keyIdx % keys.length];
+    const k = pool.keys[keyIdx % pool.keys.length];
     keyIdx++;
     return k;
   };
@@ -121,24 +138,28 @@ async function runOneSource(
       stats.inFlight++;
       try {
         const apiKey = acquireKey();
+        const modelToUse = src.model ?? runtime.model ?? sourceModel;
         if (!template) {
           const userContent = String(record.text ?? "");
           const messages = [{ role: "user" as const, content: userContent }];
           const { content, reasoning } = await callOpenRouterMessages(
-            apiBase, apiKey, runtime.model, messages, undefined, runtime.reasoningEffort
+            pool.apiBase, apiKey, modelToUse, messages, undefined, runtime.reasoningEffort
           );
           const out = buildOutputMessages(
             "", userContent, content, false, reasoning, cfg.save_old_format ?? false
           );
-          outStream.write(JSON.stringify({ messages: out }) + "\n");
+          outStream.write(JSON.stringify({ messages: out, _provider: providerName }) + "\n");
         } else {
-          const { messages, usageTotals } = await executeMultiTurn(
-            apiBase, apiKey, runtime.model, template, record,
+          const { messages } = await executeMultiTurn(
+            pool.apiBase, apiKey, modelToUse, template, record,
             cfg.save_old_format ?? false,
             cfg.store_system ?? true,
             undefined, runtime.reasoningEffort, cfg.timeout ?? null
           );
-          const outRow: { messages: typeof messages; metadata?: { [k: string]: any } } = { messages };
+          const outRow: { messages: typeof messages; metadata?: { [k: string]: any }; _provider: string } = {
+            messages,
+            _provider: providerName
+          };
           if (template.metadataKeys && template.metadataKeys.length > 0) {
             const meta: { [k: string]: any } = {};
             for (const k of template.metadataKeys) {
@@ -148,12 +169,11 @@ async function runOneSource(
             if (Object.keys(meta).length > 0) outRow.metadata = meta;
           }
           outStream.write(JSON.stringify(outRow) + "\n");
-          void usageTotals;
         }
         stats.ok++;
       } catch (err: any) {
         stats.err++;
-        console.error(`[${src.name}] error: ${err?.message ?? err}`);
+        console.error(`[${src.name}/${providerName}] error: ${err?.message ?? err}`);
       } finally {
         stats.inFlight--;
         stats.total++;
@@ -163,11 +183,12 @@ async function runOneSource(
     p.finally(() => inFlight.delete(p));
   };
 
-  if (src.type === "arxiv-hf") {
+  if (src.type === "arxiv-hf" || src.type === "hf-dataset") {
+    const dataset = src.dataset ?? "common-pile/arxiv_papers";
     for await (const row of streamArxivRows({
-      dataset: src.dataset,
+      dataset,
       config: src.config,
-      split: src.split,
+      split: src.split ?? "train",
       offset: src.offset,
       limit: src.limit
     })) {
@@ -218,20 +239,6 @@ async function runOneSource(
       await slotWait();
       handleRecord(rec);
     }
-  } else if (src.type === "hf-dataset") {
-    if (!src.dataset) throw new Error(`source ${src.name}: 'dataset' is required for type hf-dataset`);
-    for await (const row of streamArxivRows({
-      dataset: src.dataset,
-      config: src.config,
-      split: src.split ?? "train",
-      offset: src.offset,
-      limit: src.limit
-    })) {
-      const sourceState = runtime.state.sources.find((s) => s.name === src.name);
-      if (!sourceState || !sourceState.enabled) break;
-      await slotWait();
-      handleRecord(recordFromArxiv(row));
-    }
   } else {
     throw new Error(`Unknown source type: ${src.type}`);
   }
@@ -246,16 +253,19 @@ export async function runFromConfig(opts: RunOpts): Promise<void> {
 
   console.log(`\nLoaded config: model=${cfg.model}, output=${cfg.output}, sources=${cfg.sources.length}`);
   for (const s of cfg.sources) {
-    console.log(`  - ${s.name} (${s.type}) concurrency=${s.concurrency}`);
+    const prov = s.provider ?? "openrouter";
+    console.log(`  - ${s.name} (${s.type} via ${prov}) concurrency=${s.concurrency}${s.model ? ` model=${s.model}` : ""}`);
   }
 
-  const apiBase = cfg.api ?? "https://openrouter.ai/api/v1";
   let template: Template | null = null;
   if (cfg.template) {
     template = loadTemplate(resolve(cfg.template));
   }
 
-  const keys = await setupOpenRouterKeys(cfg);
+  const pools = await setupProviderKeys(cfg);
+  for (const [name, pool] of Object.entries(pools)) {
+    console.log(`[${name}] ready: ${pool.keys.length} key(s), apiBase=${pool.apiBase}`);
+  }
 
   const runtimeState: RuntimeState = {
     model: cfg.model,
@@ -281,7 +291,7 @@ export async function runFromConfig(opts: RunOpts): Promise<void> {
   });
 
   const sourceTasks = cfg.sources.map((s) =>
-    runOneSource(s, runtime, cfg, template, apiBase, keys.keys, outStream, stats).catch((err) => {
+    runOneSource(s, runtime, cfg, template, pools, outStream, stats).catch((err) => {
       console.error(`[${s.name}] fatal: ${err?.message ?? err}`);
     })
   );
@@ -294,7 +304,7 @@ export async function runFromConfig(opts: RunOpts): Promise<void> {
 
   repl.stop();
   outStream.end();
-  await teardownKeys(keys);
+  await teardownAllPools(pools);
 
   console.log(`\nDone. ok=${stats.ok}, err=${stats.err}, total=${stats.total}`);
 }

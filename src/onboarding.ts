@@ -38,8 +38,8 @@ const SOURCE_PRESETS: { [k: string]: Omit<SourceConfig, "concurrency"> } = {
 
 const PROVIDER_OPTIONS = [
   { key: "openrouter", label: "OpenRouter (default)" },
+  { key: "nvidia", label: "NVIDIA Build / NIM (integrate.api.nvidia.com)" },
   { key: "openai", label: "OpenAI direct" },
-  { key: "anthropic", label: "Anthropic direct" },
   { key: "together", label: "Together AI" },
   { key: "fireworks", label: "Fireworks AI" },
   { key: "deepinfra", label: "DeepInfra" }
@@ -136,10 +136,15 @@ export async function runOnboarding(opts: { savePath?: string } = {}): Promise<D
     }
   }
 
-  // Other providers — single-key each
+  // Other providers — multi-key support (comma-separated for fan-out)
   for (const p of PROVIDER_OPTIONS.slice(1)) {
-    const keyVal = await prompt(rl, `${p.label} API key`);
-    if (keyVal) providers[p.key] = { keys: [keyVal] };
+    const tip = p.key === "nvidia"
+      ? "(comma-separated for fan-out across multiple NVIDIA accounts; 40 RPM each)"
+      : "(comma-separated for fan-out)";
+    const keyRaw = await prompt(rl, `${p.label} API key(s) ${tip}`);
+    if (!keyRaw) continue;
+    const keys = keyRaw.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+    if (keys.length > 0) providers[p.key] = { keys };
   }
 
   if (Object.keys(providers).length === 0) {

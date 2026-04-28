@@ -144,8 +144,67 @@ All changes hot-apply without restart.
 
 ## Multi-key vs management-key
 
-- **`keys` list** — fan out across N user-provided keys. Use this when you've already created multiple OpenRouter accounts/keys.
-- **`management_key` + `auto_spawn_count`** — give the program your management key and it creates N ephemeral sub-keys at start, uses them, deletes them on `:q`. Bills attribute to the management key. Convenient for free-tier work.
+- **`keys` list** — fan out across N user-provided keys. Use this when you've already created multiple OpenRouter (or NVIDIA, OpenAI, etc.) accounts/keys.
+- **`management_key` + `auto_spawn_count`** — give the program your OpenRouter management key and it creates N ephemeral sub-keys at start, uses them, deletes them on `:q`. Bills attribute to the management key. Convenient for free-tier work. **OpenRouter only** — no other provider has an equivalent key-spawning API.
+
+## Providers
+
+`source.provider` selects which configured provider routes that source's requests. Each provider can have its own keys and its own model namespace.
+
+| Provider | API base | Mode B (auto-spawn) | Notes |
+|---|---|---|---|
+| `openrouter` (default) | `openrouter.ai/api/v1` | ✓ | Aggregator with widest model selection |
+| `nvidia` | `integrate.api.nvidia.com/v1` | ✗ | NVIDIA Build / NIM, OpenAI-compatible. 40 RPM free tier. Use multi-key fan-out across multiple NVIDIA accounts |
+| `openai` | `api.openai.com/v1` | ✗ | OpenAI direct |
+| `together` | `api.together.xyz/v1` | ✗ | Together AI |
+| `fireworks` | `api.fireworks.ai/inference/v1` | ✗ | Fireworks AI |
+| `deepinfra` | `api.deepinfra.com/v1/openai` | ✗ | DeepInfra |
+
+### NVIDIA example
+
+```yaml
+model: meta/llama-3.1-405b-instruct
+output: ./nvidia-out.jsonl
+template: ./examples/arxiv.yaml
+
+providers:
+  nvidia:
+    keys:
+      - nvapi-...           # add multiple for higher effective RPM (40 RPM each)
+      - nvapi-...
+      - nvapi-...
+
+sources:
+  - name: arxiv
+    type: arxiv-hf
+    provider: nvidia        # this source uses the nvidia keys
+    model: nvidia/nemotron-4-340b-instruct   # override the global model for this source
+    dataset: common-pile/arxiv_papers
+    concurrency: 6          # 6 across 3 keys keeps you under 40 RPM per key
+```
+
+NVIDIA model namespace examples: `nvidia/nemotron-4-340b-instruct`, `meta/llama-3.1-405b-instruct`, `meta/llama-3.3-70b-instruct`, `deepseek-ai/deepseek-r1`, `openai/gpt-oss-120b`. See https://build.nvidia.com/explore/discover for the full catalog.
+
+### Mixed providers in one config
+
+Sources can use different providers in the same run:
+
+```yaml
+sources:
+  - name: arxiv-fast
+    type: arxiv-hf
+    provider: openrouter
+    model: openai/gpt-oss-20b:free
+    concurrency: 8
+  - name: arxiv-deep
+    type: arxiv-corpus
+    path: ./corpus/work/corpus.jsonl
+    provider: nvidia
+    model: nvidia/nemotron-4-340b-instruct
+    concurrency: 4
+```
+
+Both sources run concurrently. Each routes to its own provider's keys + base URL.
 
 ## Corpus builder (Python, under `./corpus/`)
 

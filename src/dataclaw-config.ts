@@ -12,6 +12,8 @@ export type ProviderConfig = {
 export type SourceConfig = {
   name: string;
   type: "arxiv-hf" | "arxiv-corpus" | "txt" | "jsonl" | "hf-dataset";
+  provider?: string;
+  model?: string;
   dataset?: string;
   config?: string;
   split?: string;
@@ -101,6 +103,9 @@ export function validate(cfg: DataclawConfig): string[] {
     if (hasMgmt && (!p.auto_spawn_count || p.auto_spawn_count < 1)) {
       errs.push(`providers.${name}: when using \`management_key\`, set \`auto_spawn_count\` >= 1`);
     }
+    if (hasMgmt && name !== "openrouter") {
+      errs.push(`providers.${name}: \`management_key\` is only supported for openrouter (auto-spawn API). Use \`keys\` instead.`);
+    }
   }
   return errs;
 }
@@ -135,6 +140,8 @@ export function loadConfig(path?: string): DataclawConfig {
   const sources: SourceConfig[] = sourcesRaw.map((s: any) => ({
     name: String(s.name ?? ""),
     type: String(s.type ?? "") as SourceConfig["type"],
+    provider: asString(s.provider),
+    model: asString(s.model),
     dataset: asString(s.dataset),
     config: asString(s.config),
     split: asString(s.split),
@@ -197,6 +204,8 @@ export function saveConfig(cfg: DataclawConfig, path: string = GLOBAL_CONFIG_PAT
   for (const s of cfg.sources) {
     lines.push(`  - name: ${s.name}`);
     lines.push(`    type: ${s.type}`);
+    if (s.provider) lines.push(`    provider: ${s.provider}`);
+    if (s.model) lines.push(`    model: ${s.model}`);
     if (s.dataset) lines.push(`    dataset: ${s.dataset}`);
     if (s.config) lines.push(`    config: ${s.config}`);
     if (s.split) lines.push(`    split: ${s.split}`);

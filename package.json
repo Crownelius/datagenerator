@@ -1,6 +1,6 @@
 {
   "name": "@crownelius/datagenerator-arxiv",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Onboarding-driven JSONL dataset builder. Multi-source (arxiv, HF datasets, JSONL, TXT), multi-key OpenRouter (or auto-spawn from a management key), runtime REPL controls. Bundled with a Python corpus-builder under ./corpus.",
   "type": "module",
   "license": "Apache-2.0",
