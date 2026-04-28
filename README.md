@@ -1,151 +1,178 @@
-# datagenerator
+# Datagenerator-arxiv
 
-CLI for generating JSONL datasets from a TXT file or an arxiv (Hugging Face Hub) stream using LLMs. Multi-turn conversation templates, OpenRouter routing, free-tier key spawning, optional reasoning capture.
+End-to-end pipeline for building LLM training datasets from arxiv (and other sources). Two tools in one repo:
 
-Fork of [@teichai/datagen](https://github.com/TeichAI/datagen) (Apache 2.0). Adds:
+- **TS CLI at the root** — `datagen`. Onboarding wizard, multi-source streaming, multi-turn templates, OpenRouter (or any OpenAI-compatible API), runtime REPL controls.
+- **Python tool under `corpus/`** — `arxiv-corpus`. Builds a fresh post-2024 arxiv corpus (OAI-PMH metadata + direct PDF download + `pymupdf4llm` markdown conversion) and pushes it to HuggingFace Hub in the `common-pile/arxiv_papers` schema.
 
-- `--source arxiv` — stream papers from `common-pile/arxiv_papers` (or any HF dataset with the same shape) via the HF Datasets Server API
-- `--template <yaml>` — multi-turn conversation per record, with `{placeholder}` substitution from record fields
-- An `examples/arxiv.yaml` template that produces a 4-turn analysis per paper (explain → improve field → flaws → improve idea)
+The two compose: `arxiv-corpus` builds the corpus → publishes to HF → `datagen` consumes the corpus and produces a multi-turn JSONL dataset for SFT.
+
+Forked from [TeichAI/datagen](https://github.com/TeichAI/datagen) (Apache 2.0). Adds onboarding, config files, runtime mutability, multi-source plugins, and the bundled corpus-builder.
 
 ## Install
 
 ```bash
-npm i -g @crownelius/datagenerator
+git clone https://github.com/Crownelius/Datagenerator-arxiv
+cd Datagenerator-arxiv
+npm install && npm run build
+npm install -g .   # or: npm link
+
+# Optional: install the corpus builder
+pip install -e ./corpus
 ```
 
-Or local + npx:
+## Quick start
 
 ```bash
-npm i -D @crownelius/datagenerator
-npx datagenerator --help
+datagen
 ```
 
-The `datagen` binary is also installed as an alias for backwards compatibility with the upstream tool.
+First run with no config triggers an interactive onboarding wizard. Pick sources, paste OpenRouter key(s) or a management key, set concurrency. Config saved to `~/.dataclaw/config.yaml`.
 
-## Quick start: TXT prompts (single-turn)
+Subsequent runs use the saved config:
 
 ```bash
-export API_KEY="your_openrouter_key"
-echo "Explain the CAP theorem in 5 bullet points." > prompts.txt
-datagenerator --model openai/gpt-oss-120b:free --prompts prompts.txt
+datagen run
 ```
 
-## Quick start: arxiv (multi-turn)
+## Onboarding (first run)
 
-```bash
-export API_KEY="your_openrouter_key"
-datagenerator \
-  --model openai/gpt-oss-120b:free \
-  --source arxiv \
-  --template examples/arxiv.yaml \
-  --source.limit 50 \
-  --reasoningEffort high \
-  --concurrent 10 \
-  --out arxiv_dataset.jsonl
+```
+  ════════════════════════════════════════════════════════════
+    Welcome to Datagenerator-arxiv. First-run setup.
+  ════════════════════════════════════════════════════════════
+
+Pick one or more data sources:
+  1) arxiv (HuggingFace common-pile)
+  2) arxiv (local corpus from corpus-builder)
+  3) TXT prompts (one per line)
+  4) Custom HuggingFace dataset
+  5) Local JSONL file
+Choose (comma-separated, e.g. 1,3): 1
+
+Concurrency for "arxiv" (10): 10
+
+OpenRouter setup mode:
+  1) Skip OpenRouter
+  2) Provide one or more inference keys
+  3) Provide one management key (auto-spawn sub-keys at runtime)
+Choose: 3
+OpenRouter management key: ********
+Number of sub-keys to auto-spawn (10): 10
+
+Default model (openai/gpt-oss-120b:free): openai/gpt-oss-120b:free
+Reasoning effort (high): high
+Output JSONL path (./dataset.jsonl): ./dataset.jsonl
+Use a multi-turn template? [Y/n]: y
+Template path (./examples/arxiv.yaml): ./examples/arxiv.yaml
+
+  ✓ Saved config to /home/you/.dataclaw/config.yaml
 ```
 
-For each paper streamed from `common-pile/arxiv_papers`, the model runs the 4-turn template defined in `examples/arxiv.yaml`. Each output line is one paper's full conversation as a `messages` array, with `metadata` (paper id + title) attached.
+## Config file
 
-### Output format
-
-Single-turn (TXT source) — each line:
-
-```json
-{"messages":[{"role":"user","content":"..."},{"role":"assistant","thinking":"...","content":"..."}]}
-```
-
-Multi-turn (arxiv source) — each line:
-
-```json
-{"messages":[
-  {"role":"system","content":"You are a senior research scientist..."},
-  {"role":"user","content":"Below is the text of arxiv paper 0704.3395..."},
-  {"role":"assistant","thinking":"...","content":"..."},
-  {"role":"user","content":"How can this paper improve the field..."},
-  {"role":"assistant","thinking":"...","content":"..."},
-  ...
-],"metadata":{"id":"0704.3395","title":"..."}}
-```
-
-Pass `--save-old-format` to embed `<think>...</think>` inside `content` instead (DeepSeek-R1 / Kimi convention).
-
-## Configuration file
-
-Same flags can be loaded from a YAML/JSON config:
+Single source of truth for the run. Edit by hand or via `datagen onboard`. Example:
 
 ```yaml
 model: openai/gpt-oss-120b:free
-out: ./arxiv.jsonl
-source: arxiv
+reasoning_effort: high
+output: ./dataset.jsonl
 template: ./examples/arxiv.yaml
-reasoningEffort: high
-concurrent: 10
-source:
-  dataset: common-pile/arxiv_papers
-  limit: 250
-  offset: 0
-openrouter:
-  providerSort: throughput
+
+providers:
+  openrouter:
+    # Mode A: list any number of inference keys; round-robin across them
+    keys:
+      - sk-or-v1-...
+      - sk-or-v1-...
+      - sk-or-v1-...
+
+    # OR Mode B (mutually exclusive with `keys`):
+    # one management key, the program auto-spawns N ephemeral sub-keys
+    # at startup and deletes them on exit.
+    # management_key: sk-or-v1-...
+    # auto_spawn_count: 10
+
+  # Optional additional providers
+  anthropic:
+    keys: [sk-ant-...]
+  openai:
+    keys: [sk-...]
+
+sources:
+  - name: arxiv
+    type: arxiv-hf
+    dataset: common-pile/arxiv_papers
+    concurrency: 10
+  - name: corpus
+    type: arxiv-corpus
+    path: ./corpus/work/corpus.jsonl
+    concurrency: 5
 ```
+
+Lookup order: `./dataclaw.yaml` (project-local), then `~/.dataclaw/config.yaml` (global).
+
+## Runtime REPL
+
+Once a run starts, type colon-commands at any time:
+
+```
+:c <N>            set concurrency for ALL active sources
+:c <src> <N>      set concurrency for one source
+:m <model>        change model
+:r <effort>       set reasoning effort
+:src add <name>   enable a configured source
+:src rm <name>    disable a source (in-flight requests finish)
+:pause            pause new starts
+:resume           resume
+:status           show full state
+:help             list commands
+:q                graceful quit, drain in-flight, save state
+```
+
+All changes hot-apply without restart.
+
+## Source types
+
+| Type | Description |
+|---|---|
+| `arxiv-hf` | Stream a HuggingFace arxiv dataset (default `common-pile/arxiv_papers`) |
+| `arxiv-corpus` | Read a local JSONL produced by the bundled `corpus/` Python tool |
+| `txt` | One prompt per line in a TXT file (legacy single-turn) |
+| `jsonl` | Generic JSONL with `id` + `text` fields |
+| `hf-dataset` | Any HuggingFace dataset with `id` + `text` fields |
+
+## Multi-key vs management-key
+
+- **`keys` list** — fan out across N user-provided keys. Use this when you've already created multiple OpenRouter accounts/keys.
+- **`management_key` + `auto_spawn_count`** — give the program your management key and it creates N ephemeral sub-keys at start, uses them, deletes them on `:q`. Bills attribute to the management key. Convenient for free-tier work.
+
+## Corpus builder (Python, under `./corpus/`)
+
+Free pipeline for building a fresh post-2024 arxiv corpus and publishing it to HuggingFace Hub. See [`corpus/README.md`](corpus/README.md).
 
 ```bash
-datagenerator --config config.yaml
+pip install -e ./corpus
+arxiv-corpus build --from 2025-01-01 --until 2026-04-27 --workdir ./work \
+  --repo Crownelius/arxiv-papers-2025-2026
 ```
 
-## Templates
+Outputs JSONL in the `common-pile/arxiv_papers` schema, drop-in compatible with the `arxiv-hf` source above.
 
-A template is YAML or JSON with:
+## Legacy CLI (TXT mode)
 
-- `system` (string, optional) — system prompt
-- `turns` (string array, required) — one entry per turn; each turn is a user prompt with `{placeholder}` substitution from record fields
-- `metadataKeys` (string array, optional) — record fields to attach to the output line as `metadata`
-
-For arxiv records, available fields are: `id`, `text`, `title`, `source`, plus any flat scalar fields under `metadata` (e.g. `license`, `authors`, `submitter`, `url`).
-
-The model is given the FULL conversation context on each turn (system + all prior user/assistant pairs + the new user turn). Earlier turns' assistant outputs become context for later turns.
-
-## Options
-
-All upstream options:
-
-- `--model <name>` — required.
-- `--prompts <file>` — required when `--source txt` (default).
-- `--out <file>` — output JSONL (default `dataset.jsonl`).
-- `--api <baseUrl>` — API base (default OpenRouter).
-- `--system <text>` — system prompt for single-turn TXT mode.
-- `--store-system true|false` — store system message in output (default `true`).
-- `--concurrent <num>` — parallel records in flight (default `1`).
-- `--openrouter.isFree true|false` — treat `API_KEY` as a management key; auto-create per-request keys for free models.
-- `--openrouter.provider <slugs>` — comma-separated provider slugs.
-- `--openrouter.providerSort <price|throughput|latency>` — provider routing sort.
-- `--reasoningEffort <none|minimal|low|medium|high|xhigh>` — passes through as `reasoning.effort`.
-- `--save-old-format` — store assistant reasoning in legacy `<think>` tags inside content.
-- `--dataset-readme [file]` — generate a HF-Hub-ready dataset card.
-- `--timeout <ms>` — request timeout.
-- `--no-progress` — disable progress bar.
-
-Multi-turn / arxiv:
-
-- `--source <txt|arxiv>` — input source (default `txt`).
-- `--template <file>` — multi-turn template (required when `--source arxiv`; optional otherwise — currently TXT mode does not consume templates).
-- `--source.dataset <id>` — HF Hub dataset id (default `common-pile/arxiv_papers`).
-- `--source.config <name>` — HF dataset config (default `default`).
-- `--source.split <name>` — HF dataset split (default `train`).
-- `--source.limit <n>` — max records to process.
-- `--source.offset <n>` — skip the first N records.
-
-## Development
+The original `@teichai/datagen` CLI is still supported for backwards compatibility:
 
 ```bash
-npm install
-npm run build
-npm test
+datagen --model openai/gpt-oss-120b:free --prompts prompts.txt --concurrent 5
 ```
+
+Any invocation with explicit `--model`/`--prompts` flags falls through to legacy mode. The new modes are activated by `datagen onboard` (wizard), `datagen run` (config-driven), or `datagen` with no args (auto-detects).
 
 ## Attribution
 
-Forked from [TeichAI/datagen](https://github.com/TeichAI/datagen) — Apache 2.0. Original CLI design, OpenRouter routing, free-key spawning, progress bar, dataset-README generator are from the upstream project. Multi-turn template engine and arxiv source are additions in this fork.
+- Forked from [TeichAI/datagen](https://github.com/TeichAI/datagen) — original CLI design, OpenRouter routing, free-tier sub-key spawning, progress bar, dataset-card generator
+- Multi-turn templates, arxiv source, onboarding wizard, REPL, runtime mutability, multi-source plugins, multi-key fan-out, and the bundled `corpus/` Python tool are additions in this fork
 
 ## License
 
