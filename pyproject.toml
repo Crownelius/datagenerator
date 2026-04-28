@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arxiv-corpus-builder"
+version = "0.1.0"
+description = "Build a fresh arxiv corpus (post-2024) by harvesting OAI-PMH metadata, downloading PDFs, converting to markdown, and pushing to a HuggingFace Hub dataset in the common-pile schema."
+readme = "README.md"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.31",
+    "pymupdf4llm>=0.0.17",
+    "huggingface_hub>=0.24",
+    "datasets>=2.20",
+    "tqdm>=4.66",
+    "python-dateutil>=2.9",
+]
+
+[project.scripts]
+arxiv-corpus = "arxiv_corpus.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+arxiv_corpus = ["py.typed"]
